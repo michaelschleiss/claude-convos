@@ -149,18 +149,32 @@ pub fn run_editor(session_file: &Path) {
         });
     }
 
-    // Build context messages: only API-visible types, grouped by message.id for multi-line assistant
+    // Find the last compact_boundary — only messages after it are in active context.
+    // This mirrors Claude Code's resume logic (RT function).
+    let last_compact_idx = entries
+        .iter()
+        .rposition(|e| e.entry_type == "system" && e.subtype.as_deref() == Some("compact_boundary"));
+
+    let context_start = match last_compact_idx {
+        Some(idx) => idx, // include the compact_boundary itself (its child is the summary)
+        None => 0,        // no compaction — entire file is context
+    };
+
+    // Build context messages: only API-visible types after last compaction
     let mut context_msgs: Vec<ContextMessage> = Vec::new();
     let api_types = ["user", "assistant", "system"];
 
     for (i, entry) in entries.iter().enumerate() {
+        if i < context_start {
+            continue; // skip pre-compaction messages
+        }
         if !api_types.contains(&entry.entry_type.as_str()) {
             continue;
         }
         // Skip system subtypes that are just metadata
         if entry.entry_type == "system" {
             match entry.subtype.as_deref() {
-                Some("stop_hook_summary") | Some("turn_duration") => continue,
+                Some("stop_hook_summary") | Some("turn_duration") | Some("compact_boundary") => continue,
                 _ => {}
             }
         }
