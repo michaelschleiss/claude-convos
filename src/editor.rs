@@ -245,10 +245,8 @@ fn run_editor_tui(
     let mut scroll_offset: usize = 0;
     let mut dirty = false;
 
-    // Reset scroll region (DECSTBM) and origin mode (DECOM) — Claude Code's statusline
-    // sets a scroll region that child processes inherit, causing rendering offset.
-    // Then enter alternate screen for a clean surface.
-    let _ = io::stderr().write_all(b"\x1b[r\x1b[?6l\x1b[?1049h\x1b[?25l");
+    // Enter alt screen, reset scroll region inside it, clear, home
+    let _ = io::stderr().write_all(b"\x1b[?1049h\x1b[r\x1b[?6l\x1b[2J\x1b[H\x1b[?25l");
     let _ = io::stderr().flush();
 
     let leave = || {
@@ -286,10 +284,13 @@ fn run_editor_tui(
         out.push_str("\x1b[K\n");
 
         // Column headers
+        // Row format: " " + idx(w_idx) + " " + mark(3) + " " + role(w_role) + " " + content
+        // Fixed overhead = 1 + 1 + 3 + 1 + 1 + 1 = 8 spaces/separators
         let w_idx = 4;
         let w_role = 13;
-        let w_content = if term_width > w_idx + w_role + 10 {
-            term_width - w_idx - w_role - 6
+        let fixed_overhead = 8; // spaces between columns
+        let w_content = if term_width > w_idx + w_role + fixed_overhead + 10 {
+            term_width - w_idx - w_role - fixed_overhead
         } else {
             40
         };

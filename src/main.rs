@@ -49,6 +49,10 @@ struct Cli {
     /// Output as JSON instead of interactive display
     #[arg(long)]
     json: bool,
+
+    /// Open context editor directly on a session file
+    #[arg(long)]
+    edit: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -339,7 +343,21 @@ fn terminal_size() -> (usize, usize) {
             ws_xpixel: u16,
             ws_ypixel: u16,
         }
-        // Try stderr (2), then stdout (1), then stdin (0)
+
+        // Try /dev/tty first (the actual controlling terminal)
+        if let Ok(tty) = fs::File::open("/dev/tty") {
+            use std::os::unix::io::AsRawFd;
+            let fd = tty.as_raw_fd();
+            unsafe {
+                let mut ws: Winsize = mem::zeroed();
+                if libc_ioctl(fd, 0x5413, &raw mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0
+                {
+                    return (ws.ws_col as usize, ws.ws_row as usize);
+                }
+            }
+        }
+
+        // Fallback: try stderr (2), stdout (1), stdin (0)
         for fd in [2, 1, 0] {
             unsafe {
                 let mut ws: Winsize = mem::zeroed();
@@ -641,9 +659,8 @@ fn run_interactive(conversations: &[ConversationInfo], total_files: usize) {
     let mut cursor: usize = 0;
     let mut scroll_offset: usize = 0;
 
-    // Reset scroll region (DECSTBM) and origin mode (DECOM) inherited from Claude Code,
-    // then enter alternate screen buffer and hide cursor
-    let _ = io::stderr().write_all(b"\x1b[r\x1b[?6l\x1b[?1049h\x1b[?25l");
+    // Reset scroll region BEFORE and AFTER entering alt screen (they have independent state)
+    let _ = io::stderr().write_all(b"\x1b[r\x1b[?6l\x1b[?1049h\x1b[r\x1b[?6l\x1b[2J\x1b[H\x1b[?25l");
     let _ = io::stderr().flush();
 
     let leave = |raw: &RawMode| {
@@ -849,6 +866,18 @@ fn run_interactive(conversations: &[ConversationInfo], total_files: usize) {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Direct editor mode: skip the picker entirely
+    if let Some(ref path) = cli.edit {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            editor::run_editor(&p);
+        } else {
+            eprintln!("File not found: {path}");
+        }
+        return;
+    }
+
     let (conversations, total_files) = load_conversations(&cli);
 
     if cli.json {
