@@ -865,4 +865,6 @@ unsafe extern "C" {
     fn libc_tcgetattr(fd: i32, termios: *mut u8) -> i32;
     #[link_name = "tcsetattr"]
     fn libc_tcsetattr(fd: i32, action: i32, termios: *const u8) -> i32;
+    #[link_name = "tcflush"]
+    fn libc_tcflush(fd: i32, queue_selector: i32) -> i32;
 }

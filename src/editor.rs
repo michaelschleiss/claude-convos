@@ -4,8 +4,8 @@ use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 
 use crate::{
-    pad_or_truncate, terminal_size, ALT_SCREEN_OFF, ALT_SCREEN_ON, BG_BLUE, BLUE, BOLD, CYAN,
-    DIM, GREEN, HIDE_CURSOR, MAGENTA, RED, RESET, SHOW_CURSOR, WHITE, YELLOW,
+    libc_tcflush, pad_or_truncate, terminal_size, ALT_SCREEN_OFF, ALT_SCREEN_ON, BG_BLUE, BLUE,
+    BOLD, CYAN, DIM, GREEN, HIDE_CURSOR, MAGENTA, RED, RESET, SHOW_CURSOR, WHITE, YELLOW,
 };
 
 /// A single JSONL entry with its raw line and parsed metadata.
@@ -232,6 +232,13 @@ fn run_editor_tui(
             return;
         }
     };
+
+    // Flush any stale input from the previous TUI
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = io::stdin().as_raw_fd();
+        unsafe { libc_tcflush(fd, 0); } // TCIFLUSH = 0
+    }
 
     let count = msgs.len();
     let mut cursor: usize = 0;
