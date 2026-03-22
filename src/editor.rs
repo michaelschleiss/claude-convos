@@ -249,6 +249,9 @@ fn run_editor_tui(
     let mut cursor: usize = 0;
     let mut scroll_offset: usize = 0;
     let mut dirty = false;
+    let mut sorted_by_size = false;
+    // View order: indices into msgs. Chronological by default, sortable by size.
+    let mut view_order: Vec<usize> = (0..count).collect();
 
     // Enter alt screen, reset scroll region inside it, clear, home
     let _ = io::stderr().write_all(b"\x1b[?1049h\x1b[r\x1b[?6l\x1b[2J\x1b[H\x1b[?25l");
@@ -282,6 +285,7 @@ fn run_editor_tui(
         let marked_bytes: usize = msgs.iter().filter(|m| m.marked).map(|m| m.content_bytes).sum();
         let total_kb = total_bytes as f64 / 1024.0;
 
+        let sort_label = if sorted_by_size { " [sorted by size]" } else { "" };
         let status = if dirty {
             let saved_kb = marked_bytes as f64 / 1024.0;
             format!("{RED}[{marked_count} marked, {saved_kb:.0}KB to free]{RESET}")
@@ -289,7 +293,7 @@ fn run_editor_tui(
             String::new()
         };
         out.push_str(&format!(
-            "{BOLD}{CYAN}Context Editor{RESET}  {DIM}({count} msgs, {total_kb:.0}KB total){RESET}  {status}\x1b[K\n"
+            "{BOLD}{CYAN}Context Editor{RESET}  {DIM}({count} msgs, {total_kb:.0}KB total){sort_label}{RESET}  {status}\x1b[K\n"
         ));
         out.push_str("\x1b[K\n");
 
@@ -315,10 +319,12 @@ fn run_editor_tui(
 
         // Rows
         for i in scroll_offset..end {
-            let m = &msgs[i];
+            let mi = view_order[i]; // actual index into msgs
+            let m = &msgs[mi];
             let selected = i == cursor;
 
-            let idx_str = format!("{:>w_idx$}", i + 1);
+            // Show original position number (chronological index)
+            let idx_str = format!("{:>w_idx$}", mi + 1);
             let role_plain = pad_or_truncate(&m.role, w_role);
             let content = pad_or_truncate(&m.display, w_content);
 
@@ -365,7 +371,8 @@ fn run_editor_tui(
         out.push_str(&format!("{DIM}{}{RESET}\x1b[K\n", "─".repeat(line_width)));
 
         // Footer
-        let sel = &msgs[cursor];
+        let sel_idx = view_order[cursor];
+        let sel = &msgs[sel_idx];
         let ts = if !sel.entry_indices.is_empty() {
             entries[sel.entry_indices[0]]
                 .timestamp
@@ -379,7 +386,7 @@ fn run_editor_tui(
             cursor + 1,
         ));
         out.push_str(&format!(
-            "{DIM}j/k: navigate  d: toggle delete  s: save  q: quit (no save){RESET}\x1b[K"
+            "{DIM}j/k: navigate  v/Enter: view  d: delete  o: sort by size  s: save  q: quit{RESET}\x1b[K"
         ));
 
         let _ = io::stderr().write_all(out.as_bytes());
@@ -424,7 +431,8 @@ fn run_editor_tui(
             EditorKey::End => cursor = count - 1,
             EditorKey::Delete => {
                 // Toggle mark on current message
-                let m = &mut msgs[cursor];
+                let mi = view_order[cursor];
+                let m = &mut msgs[mi];
                 // Don't allow deleting compact summaries — that breaks the session
                 if !entries[m.entry_indices[0]].is_compact_summary {
                     m.marked = !m.marked;
@@ -437,6 +445,16 @@ fn run_editor_tui(
                         cursor += 1;
                     }
                 }
+            }
+            EditorKey::Sort => {
+                sorted_by_size = !sorted_by_size;
+                if sorted_by_size {
+                    view_order.sort_by(|&a, &b| msgs[b].content_bytes.cmp(&msgs[a].content_bytes));
+                } else {
+                    view_order = (0..count).collect(); // restore chronological
+                }
+                cursor = 0;
+                scroll_offset = 0;
             }
             EditorKey::Save => {
                 if !dirty {
@@ -540,7 +558,7 @@ fn run_editor_tui(
                 }
             }
             EditorKey::View => {
-                view_entry_detail(entries, msgs, cursor);
+                view_entry_detail(entries, msgs, view_order[cursor]);
             }
             _ => {}
         }
@@ -820,6 +838,7 @@ enum EditorKey {
     Delete,
     Save,
     View,
+    Sort,
     Quit,
     Char(u8),
     Other,
@@ -837,6 +856,7 @@ fn read_editor_key() -> EditorKey {
         b'd' | b'D' | b' ' => EditorKey::Delete, // d, D, or space to toggle
         b's' | b'S' => EditorKey::Save,
         b'v' | b'V' | b'\r' | b'\n' => EditorKey::View, // v, V, or Enter to view
+        b'o' | b'O' => EditorKey::Sort, // o to toggle sort order
         b'g' => EditorKey::Home,
         b'G' => EditorKey::End,
         27 => {
