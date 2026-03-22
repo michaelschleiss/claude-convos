@@ -339,10 +339,14 @@ fn terminal_size() -> (usize, usize) {
             ws_xpixel: u16,
             ws_ypixel: u16,
         }
-        unsafe {
-            let mut ws: Winsize = mem::zeroed();
-            if libc_ioctl(1, 0x5413, &raw mut ws) == 0 && ws.ws_col > 0 {
-                return (ws.ws_col as usize, ws.ws_row as usize);
+        // Try stderr (2), then stdout (1), then stdin (0)
+        for fd in [2, 1, 0] {
+            unsafe {
+                let mut ws: Winsize = mem::zeroed();
+                if libc_ioctl(fd, 0x5413, &raw mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0
+                {
+                    return (ws.ws_col as usize, ws.ws_row as usize);
+                }
             }
         }
     }
@@ -760,15 +764,16 @@ fn run_interactive(conversations: &[ConversationInfo], total_files: usize) {
                 resume_conversation(&conversations[cursor]);
             }
             Key::EditContext => {
-                // Leave alt screen, run editor, then re-enter
+                // Fully exit the picker's TUI (editor will use its own alt screen)
                 let _ = io::stderr()
                     .write_all(format!("{SHOW_CURSOR}{ALT_SCREEN_OFF}").as_bytes());
                 let _ = io::stderr().flush();
                 unsafe { libc_tcsetattr(0, 0, _raw.original.as_ptr()); }
 
+                // Drop into editor (it manages its own raw mode + alt screen)
                 editor::run_editor(&conversations[cursor].file_path);
 
-                // Re-enter raw mode and alt screen
+                // Fully re-enter the picker's TUI
                 unsafe {
                     let mut raw = _raw.original;
                     let lflag = u32::from_ne_bytes([raw[12], raw[13], raw[14], raw[15]]);
@@ -780,7 +785,7 @@ fn run_interactive(conversations: &[ConversationInfo], total_files: usize) {
                     libc_tcsetattr(0, 0, raw.as_ptr());
                 }
                 let _ = io::stderr()
-                    .write_all(format!("{ALT_SCREEN_ON}{HIDE_CURSOR}").as_bytes());
+                    .write_all(format!("{ALT_SCREEN_ON}\x1b[2J\x1b[H{HIDE_CURSOR}").as_bytes());
                 let _ = io::stderr().flush();
             }
             Key::Slash => {

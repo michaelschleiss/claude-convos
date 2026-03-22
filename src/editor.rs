@@ -245,12 +245,12 @@ fn run_editor_tui(
     let mut scroll_offset: usize = 0;
     let mut dirty = false;
 
+    // Use alternate screen buffer for a clean rendering surface (avoids scrollback issues)
     let _ = io::stderr().write_all(format!("{ALT_SCREEN_ON}{HIDE_CURSOR}").as_bytes());
     let _ = io::stderr().flush();
 
     let leave = || {
-        let _ =
-            io::stderr().write_all(format!("{SHOW_CURSOR}{ALT_SCREEN_OFF}").as_bytes());
+        let _ = io::stderr().write_all(format!("{SHOW_CURSOR}{ALT_SCREEN_OFF}").as_bytes());
         let _ = io::stderr().flush();
     };
 
@@ -268,6 +268,7 @@ fn run_editor_tui(
         let end = (scroll_offset + visible_rows).min(count);
 
         let mut out = String::with_capacity(8192);
+        // Move cursor home (no clear — we overwrite every line, matching the picker approach)
         out.push_str("\x1b[H");
 
         // Header
@@ -278,7 +279,7 @@ fn run_editor_tui(
             String::new()
         };
         out.push_str(&format!(
-            "{BOLD}{CYAN}Context Editor{RESET}  {DIM}({count} messages){RESET}  {status}\x1b[K\n"
+            "{BOLD}{CYAN}Context Editor{RESET}  {DIM}({count} msgs, {visible_rows} rows, {term_width}x{term_height}){RESET}  {status}\x1b[K\n"
         ));
         out.push_str("\x1b[K\n");
 
