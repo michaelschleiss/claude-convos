@@ -1,3 +1,5 @@
+mod editor;
+
 use chrono::{DateTime, Local, Utc};
 use clap::Parser;
 use rayon::prelude::*;
@@ -17,6 +19,7 @@ const GREEN: &str = "\x1b[32m";
 const MAGENTA: &str = "\x1b[35m";
 const WHITE: &str = "\x1b[37m";
 const BLUE: &str = "\x1b[34m";
+const RED: &str = "\x1b[31m";
 const BG_BLUE: &str = "\x1b[44m";
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
@@ -82,6 +85,8 @@ struct ConversationInfo {
     message_count: usize,
     is_agent: bool,
     project_dir: String,
+    #[serde(skip)]
+    file_path: PathBuf,
 }
 
 fn extract_text_content(content: &serde_json::Value) -> String {
@@ -205,6 +210,7 @@ fn parse_session(path: &PathBuf, project_dir: &str) -> Option<ConversationInfo> 
         message_count,
         is_agent,
         project_dir: project_dir.to_string(),
+        file_path: path.clone(),
     })
 }
 
@@ -398,6 +404,7 @@ enum Key {
     Home,
     End,
     Slash,
+    EditContext,
     Other,
 }
 
@@ -411,6 +418,7 @@ fn read_key() -> Key {
         b'\r' | b'\n' => Key::Enter,
         b'k' | b'K' => Key::Up,
         b'j' | b'J' => Key::Down,
+        b'e' | b'E' => Key::EditContext,
         b'g' => Key::Home,
         b'G' => Key::End,
         b'/' => Key::Slash,
@@ -712,7 +720,7 @@ fn run_interactive(conversations: &[ConversationInfo], total_files: usize) {
 
         // Footer line 2: keybindings
         out.push_str(&format!(
-            "{DIM}j/k: navigate  Enter: resume  /: search  q: quit{RESET}\x1b[K"
+            "{DIM}j/k: navigate  Enter: resume  e: edit context  /: search  q: quit{RESET}\x1b[K"
         ));
 
         // Single atomic write
@@ -749,6 +757,30 @@ fn run_interactive(conversations: &[ConversationInfo], total_files: usize) {
             Key::Enter => {
                 leave(&_raw);
                 resume_conversation(&conversations[cursor]);
+            }
+            Key::EditContext => {
+                // Leave alt screen, run editor, then re-enter
+                let _ = io::stderr()
+                    .write_all(format!("{SHOW_CURSOR}{ALT_SCREEN_OFF}").as_bytes());
+                let _ = io::stderr().flush();
+                unsafe { libc_tcsetattr(0, 0, _raw.original.as_ptr()); }
+
+                editor::run_editor(&conversations[cursor].file_path);
+
+                // Re-enter raw mode and alt screen
+                unsafe {
+                    let mut raw = _raw.original;
+                    let lflag = u32::from_ne_bytes([raw[12], raw[13], raw[14], raw[15]]);
+                    let new_lflag = lflag & !(0o0000002 | 0o0000010);
+                    let bytes = new_lflag.to_ne_bytes();
+                    raw[12] = bytes[0]; raw[13] = bytes[1];
+                    raw[14] = bytes[2]; raw[15] = bytes[3];
+                    raw[17 + 6] = 1; raw[17 + 5] = 0;
+                    libc_tcsetattr(0, 0, raw.as_ptr());
+                }
+                let _ = io::stderr()
+                    .write_all(format!("{ALT_SCREEN_ON}{HIDE_CURSOR}").as_bytes());
+                let _ = io::stderr().flush();
             }
             Key::Slash => {
                 // Move to footer and show search prompt
