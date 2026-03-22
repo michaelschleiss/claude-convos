@@ -32,6 +32,7 @@ struct ContextMessage {
     _is_tool_call: bool,
     _is_tool_result: bool,
     marked: bool,
+    content_bytes: usize, // size of message content in bytes
 }
 
 pub fn run_editor(session_file: &Path) {
@@ -201,6 +202,9 @@ pub fn run_editor(session_file: &Path) {
             role.clone()
         };
 
+        // Estimate content size (bytes of the message content sent to API)
+        let content_bytes = entry.raw.len();
+
         context_msgs.push(ContextMessage {
             entry_indices: vec![i],
             display,
@@ -208,6 +212,7 @@ pub fn run_editor(session_file: &Path) {
             _is_tool_call: is_tool_call,
             _is_tool_result: is_tr,
             marked: false,
+            content_bytes,
         });
     }
 
@@ -273,33 +278,39 @@ fn run_editor_tui(
 
         // Header
         let marked_count = msgs.iter().filter(|m| m.marked).count();
+        let total_bytes: usize = msgs.iter().map(|m| m.content_bytes).sum();
+        let marked_bytes: usize = msgs.iter().filter(|m| m.marked).map(|m| m.content_bytes).sum();
+        let total_kb = total_bytes as f64 / 1024.0;
+
         let status = if dirty {
-            format!("{RED}[{marked_count} marked for deletion]{RESET}")
+            let saved_kb = marked_bytes as f64 / 1024.0;
+            format!("{RED}[{marked_count} marked, {saved_kb:.0}KB to free]{RESET}")
         } else {
             String::new()
         };
         out.push_str(&format!(
-            "{BOLD}{CYAN}Context Editor{RESET}  {DIM}({count} msgs, {visible_rows} rows, {term_width}x{term_height}){RESET}  {status}\x1b[K\n"
+            "{BOLD}{CYAN}Context Editor{RESET}  {DIM}({count} msgs, {total_kb:.0}KB total){RESET}  {status}\x1b[K\n"
         ));
         out.push_str("\x1b[K\n");
 
         // Column headers
-        // Row format: " " + idx(w_idx) + " " + mark(3) + " " + role(w_role) + " " + content
-        // Fixed overhead = 1 + 1 + 3 + 1 + 1 + 1 = 8 spaces/separators
+        // Row: " " idx(4) " " mark(3) " " size(6) " " role(13) " " content
+        // Fixed overhead = 1+1+3+1+6+1+1+1 = 15
         let w_idx = 4;
+        let w_size = 6;
         let w_role = 13;
-        let fixed_overhead = 8; // spaces between columns
-        let w_content = if term_width > w_idx + w_role + fixed_overhead + 10 {
-            term_width - w_idx - w_role - fixed_overhead
+        let fixed_overhead = 10; // spaces between columns
+        let w_content = if term_width > w_idx + w_size + w_role + fixed_overhead + 10 {
+            term_width - w_idx - w_size - w_role - fixed_overhead
         } else {
-            40
+            30
         };
 
         out.push_str(&format!(
-            "{BOLD}{DIM} {:<w_idx$}  {:<w_role$}  {:<w_content$}{RESET}\x1b[K\n",
-            "#", "Type", "Content",
+            "{BOLD}{DIM} {:<w_idx$}      {:>w_size$} {:<w_role$} {:<w_content$}{RESET}\x1b[K\n",
+            "#", "Size", "Type", "Content",
         ));
-        let line_width = w_idx + w_role + w_content + 6;
+        let line_width = w_idx + w_size + w_role + w_content + fixed_overhead;
         out.push_str(&format!("{DIM}{}{RESET}\x1b[K\n", "─".repeat(line_width)));
 
         // Rows
@@ -313,6 +324,15 @@ fn run_editor_tui(
 
             let mark = if m.marked { "DEL" } else { "   " };
 
+            // Human-readable size
+            let size_str = if m.content_bytes >= 1_000_000 {
+                format!("{:>5.1}M", m.content_bytes as f64 / 1_000_000.0)
+            } else if m.content_bytes >= 1_000 {
+                format!("{:>5.1}K", m.content_bytes as f64 / 1_000.0)
+            } else {
+                format!("{:>5}B", m.content_bytes)
+            };
+
             // Colorize the role (applied AFTER padding so ANSI doesn't affect width)
             let role_colored = match m.role.as_str() {
                 "user" => format!("{GREEN}{role_plain}{RESET}"),
@@ -325,15 +345,15 @@ fn run_editor_tui(
 
             if selected {
                 out.push_str(&format!(
-                    "{BG_BLUE}{BOLD}{WHITE} {idx_str} {mark} {role_plain} {content}{RESET}\x1b[K\n",
+                    "{BG_BLUE}{BOLD}{WHITE} {idx_str} {mark} {size_str} {role_plain} {content}{RESET}\x1b[K\n",
                 ));
             } else if m.marked {
                 out.push_str(&format!(
-                    " {DIM}{idx_str}{RESET} {RED}{mark}{RESET} {role_colored} {DIM}\x1b[9m{content}\x1b[29m{RESET}\x1b[K\n",
+                    " {DIM}{idx_str}{RESET} {RED}{mark}{RESET} {DIM}{size_str}{RESET} {role_colored} {DIM}\x1b[9m{content}\x1b[29m{RESET}\x1b[K\n",
                 ));
             } else {
                 out.push_str(&format!(
-                    " {DIM}{idx_str}{RESET} {DIM}{mark}{RESET} {role_colored} {content}\x1b[K\n",
+                    " {DIM}{idx_str}{RESET} {DIM}{mark}{RESET} {DIM}{size_str}{RESET} {role_colored} {content}\x1b[K\n",
                 ));
             }
         }
@@ -519,6 +539,243 @@ fn run_editor_tui(
                     }
                 }
             }
+            EditorKey::View => {
+                view_entry_detail(entries, msgs, cursor);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract full readable content from a JSONL entry.
+fn extract_full_content(raw: &str) -> Vec<String> {
+    let obj: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return vec!["[parse error]".to_string()],
+    };
+
+    let mut lines = Vec::new();
+
+    // Show role/type
+    let entry_type = obj["type"].as_str().unwrap_or("?");
+    let role = obj["message"]["role"].as_str().unwrap_or("");
+    let model = obj["message"]["model"].as_str().unwrap_or("");
+    let subtype = obj["subtype"].as_str().unwrap_or("");
+    let timestamp = obj["timestamp"].as_str().unwrap_or("");
+
+    lines.push(format!("{BOLD}Type:{RESET} {entry_type}  {BOLD}Role:{RESET} {role}  {BOLD}Model:{RESET} {model}"));
+    if !subtype.is_empty() {
+        lines.push(format!("{BOLD}Subtype:{RESET} {subtype}"));
+    }
+    if !timestamp.is_empty() {
+        lines.push(format!("{BOLD}Time:{RESET} {timestamp}"));
+    }
+    if let Some(uuid) = obj["uuid"].as_str() {
+        lines.push(format!("{DIM}UUID: {uuid}{RESET}"));
+    }
+    lines.push(String::new());
+
+    // Extract content blocks
+    let msg = &obj["message"];
+    if let Some(content) = msg.get("content") {
+        match content {
+            serde_json::Value::String(s) => {
+                for line in s.lines() {
+                    lines.push(line.to_string());
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for block in arr {
+                    let bt = block["type"].as_str().unwrap_or("?");
+                    match bt {
+                        "thinking" => {
+                            lines.push(format!("{DIM}--- thinking ---{RESET}"));
+                            if let Some(t) = block["thinking"].as_str() {
+                                for line in t.lines() {
+                                    lines.push(format!("{DIM}{line}{RESET}"));
+                                }
+                            }
+                            lines.push(format!("{DIM}--- end thinking ---{RESET}"));
+                            lines.push(String::new());
+                        }
+                        "text" => {
+                            if let Some(t) = block["text"].as_str() {
+                                for line in t.lines() {
+                                    lines.push(line.to_string());
+                                }
+                            }
+                        }
+                        "tool_use" => {
+                            let name = block["name"].as_str().unwrap_or("?");
+                            lines.push(format!("{MAGENTA}{BOLD}Tool: {name}{RESET}"));
+                            if let Some(input) = block.get("input") {
+                                let pretty = serde_json::to_string_pretty(input)
+                                    .unwrap_or_else(|_| input.to_string());
+                                for line in pretty.lines() {
+                                    lines.push(format!("{DIM}{line}{RESET}"));
+                                }
+                            }
+                            lines.push(String::new());
+                        }
+                        "tool_result" => {
+                            lines.push(format!("{YELLOW}{BOLD}Tool Result:{RESET}"));
+                            let tc = &block["content"];
+                            match tc {
+                                serde_json::Value::String(s) => {
+                                    for line in s.lines() {
+                                        lines.push(line.to_string());
+                                    }
+                                }
+                                serde_json::Value::Array(arr) => {
+                                    for sub in arr {
+                                        let st = sub["type"].as_str().unwrap_or("?");
+                                        if st == "text" {
+                                            if let Some(t) = sub["text"].as_str() {
+                                                for line in t.lines() {
+                                                    lines.push(line.to_string());
+                                                }
+                                            }
+                                        } else {
+                                            lines.push(format!("[{st}]"));
+                                        }
+                                    }
+                                }
+                                _ => lines.push("[no content]".to_string()),
+                            }
+                            lines.push(String::new());
+                        }
+                        "image" => lines.push("[image content]".to_string()),
+                        "document" => lines.push("[document content]".to_string()),
+                        _ => lines.push(format!("[{bt} block]")),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Show toolUseResult if present
+    if let Some(tur) = obj.get("toolUseResult") {
+        lines.push(String::new());
+        lines.push(format!("{DIM}{BOLD}--- toolUseResult ---{RESET}"));
+        if let Some(stdout) = tur["stdout"].as_str() {
+            if !stdout.is_empty() {
+                for line in stdout.lines().take(50) {
+                    lines.push(format!("{DIM}{line}{RESET}"));
+                }
+                let total = stdout.lines().count();
+                if total > 50 {
+                    lines.push(format!("{DIM}... ({total} lines total){RESET}"));
+                }
+            }
+        }
+        if let Some(stderr) = tur["stderr"].as_str() {
+            if !stderr.is_empty() {
+                lines.push(format!("{RED}stderr:{RESET}"));
+                for line in stderr.lines().take(20) {
+                    lines.push(format!("{RED}{line}{RESET}"));
+                }
+            }
+        }
+    }
+
+    // For system messages, show content field
+    if entry_type == "system" {
+        if let Some(c) = obj["content"].as_str() {
+            lines.push(c.to_string());
+        }
+        if let Some(meta) = obj.get("compactMetadata") {
+            let pretty = serde_json::to_string_pretty(meta).unwrap_or_default();
+            for line in pretty.lines() {
+                lines.push(line.to_string());
+            }
+        }
+    }
+
+    if lines.is_empty() || lines.iter().all(|l| l.is_empty()) {
+        lines.push("[empty message]".to_string());
+    }
+
+    lines
+}
+
+/// Show full content of an entry in a scrollable view.
+fn view_entry_detail(entries: &[Entry], msgs: &[ContextMessage], msg_idx: usize) {
+    let m = &msgs[msg_idx];
+    let entry = &entries[m.entry_indices[0]];
+    let content_lines = extract_full_content(&entry.raw);
+
+    let count = content_lines.len();
+    let mut scroll: usize = 0;
+
+    loop {
+        let (term_width, term_height) = terminal_size();
+        let visible = if term_height > 4 { term_height - 4 } else { 10 };
+
+        if scroll > count.saturating_sub(visible) {
+            scroll = count.saturating_sub(visible);
+        }
+
+        let end = (scroll + visible).min(count);
+
+        let mut out = String::with_capacity(4096);
+        out.push_str("\x1b[H");
+
+        // Header
+        let role_colored = match m.role.as_str() {
+            "user" => format!("{GREEN}{}{RESET}", m.role),
+            "assistant" => format!("{BLUE}{}{RESET}", m.role),
+            "tool_call" => format!("{MAGENTA}{}{RESET}", m.role),
+            "tool_result" => format!("{YELLOW}{}{RESET}", m.role),
+            "system" => format!("{DIM}{}{RESET}", m.role),
+            _ => m.role.clone(),
+        };
+        out.push_str(&format!(
+            "{BOLD}Message {}{RESET}  {role_colored}  {DIM}{}/{count} lines{RESET}\x1b[K\n",
+            msg_idx + 1,
+            scroll + 1,
+        ));
+        out.push_str(&format!("{DIM}{}{RESET}\x1b[K\n", "─".repeat(term_width.min(120))));
+
+        // Content
+        for i in scroll..end {
+            let line = &content_lines[i];
+            // Truncate to terminal width (accounting for ANSI codes is imperfect but good enough)
+            let display: String = line.chars().take(term_width.saturating_sub(1)).collect();
+            out.push_str(&format!("{display}\x1b[K\n"));
+        }
+
+        // Blank fill
+        for _ in (end - scroll)..visible {
+            out.push_str("\x1b[K\n");
+        }
+
+        // Footer
+        out.push_str(&format!(
+            "{DIM}j/k: scroll  q/Esc: back  d: toggle delete{RESET}\x1b[K"
+        ));
+
+        let _ = io::stderr().write_all(out.as_bytes());
+        let _ = io::stderr().flush();
+
+        match read_editor_key() {
+            EditorKey::Quit | EditorKey::View => return,
+            EditorKey::Up => scroll = scroll.saturating_sub(1),
+            EditorKey::Down => {
+                if scroll + visible < count {
+                    scroll += 1;
+                }
+            }
+            EditorKey::PageUp => scroll = scroll.saturating_sub(visible),
+            EditorKey::PageDown => {
+                scroll = (scroll + visible).min(count.saturating_sub(visible));
+            }
+            EditorKey::Home => scroll = 0,
+            EditorKey::End => scroll = count.saturating_sub(visible),
+            EditorKey::Delete => {
+                // Allow toggling delete from the detail view too
+                return; // return to list, where 'd' will be handled naturally
+            }
             _ => {}
         }
     }
@@ -562,6 +819,7 @@ enum EditorKey {
     End,
     Delete,
     Save,
+    View,
     Quit,
     Char(u8),
     Other,
@@ -578,6 +836,7 @@ fn read_editor_key() -> EditorKey {
         b'j' | b'J' => EditorKey::Down,
         b'd' | b'D' | b' ' => EditorKey::Delete, // d, D, or space to toggle
         b's' | b'S' => EditorKey::Save,
+        b'v' | b'V' | b'\r' | b'\n' => EditorKey::View, // v, V, or Enter to view
         b'g' => EditorKey::Home,
         b'G' => EditorKey::End,
         27 => {
