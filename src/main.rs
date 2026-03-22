@@ -552,7 +552,8 @@ fn resume_conversation(c: &ConversationInfo) -> ! {
         eprintln!("Warning: could not cd to {cwd}");
     }
 
-    let err = Command::new("claudey")
+    let err = Command::new("claude")
+        .arg("--dangerously-skip-permissions")
         .arg("--resume")
         .arg(&c.session_id)
         .exec();

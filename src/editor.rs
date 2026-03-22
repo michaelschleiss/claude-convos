@@ -296,41 +296,33 @@ fn run_editor_tui(
             let m = &msgs[i];
             let selected = i == cursor;
 
-            let idx_str = format!("{}", i + 1);
-            let role_display = match m.role.as_str() {
-                "user" => format!("{GREEN}user{RESET}"),
-                "assistant" => format!("{BLUE}assistant{RESET}"),
-                "tool_call" => format!("{MAGENTA}tool_call{RESET}"),
-                "tool_result" => format!("{YELLOW}tool_result{RESET}"),
-                "system" => format!("{DIM}system{RESET}"),
-                _ => m.role.clone(),
-            };
-
+            let idx_str = format!("{:>w_idx$}", i + 1);
+            let role_plain = pad_or_truncate(&m.role, w_role);
             let content = pad_or_truncate(&m.display, w_content);
 
-            let mark = if m.marked {
-                format!("{RED}DEL{RESET}")
-            } else {
-                "   ".to_string()
-            };
+            let mark = if m.marked { "DEL" } else { "   " };
 
-            let role_padded = pad_or_truncate(&m.role, w_role - 4);
+            // Colorize the role (applied AFTER padding so ANSI doesn't affect width)
+            let role_colored = match m.role.as_str() {
+                "user" => format!("{GREEN}{role_plain}{RESET}"),
+                "assistant" => format!("{BLUE}{role_plain}{RESET}"),
+                "tool_call" => format!("{MAGENTA}{role_plain}{RESET}"),
+                "tool_result" => format!("{YELLOW}{role_plain}{RESET}"),
+                "system" => format!("{DIM}{role_plain}{RESET}"),
+                _ => role_plain.clone(),
+            };
 
             if selected {
                 out.push_str(&format!(
-                    "{BG_BLUE}{BOLD}{WHITE} {idx_str:>w_idx$}  {mark} {role_padded}  {content}{RESET}\x1b[K\n",
+                    "{BG_BLUE}{BOLD}{WHITE} {idx_str} {mark} {role_plain} {content}{RESET}\x1b[K\n",
                 ));
             } else if m.marked {
                 out.push_str(&format!(
-                    " {DIM}{idx_str:>w_idx$}  {mark} {role_display}{RESET}{DIM}{:<pad$}  \x1b[9m{content}\x1b[29m{RESET}\x1b[K\n",
-                    "",
-                    pad = (w_role - 4).saturating_sub(m.role.len()),
+                    " {DIM}{idx_str}{RESET} {RED}{mark}{RESET} {role_colored} {DIM}\x1b[9m{content}\x1b[29m{RESET}\x1b[K\n",
                 ));
             } else {
                 out.push_str(&format!(
-                    " {DIM}{idx_str:>w_idx$}{RESET}  {mark} {role_display}{:<pad$}  {content}\x1b[K\n",
-                    "",
-                    pad = (w_role - 4).saturating_sub(m.role.len()),
+                    " {DIM}{idx_str}{RESET} {DIM}{mark}{RESET} {role_colored} {content}\x1b[K\n",
                 ));
             }
         }
