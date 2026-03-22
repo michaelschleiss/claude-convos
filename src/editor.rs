@@ -245,8 +245,10 @@ fn run_editor_tui(
     let mut scroll_offset: usize = 0;
     let mut dirty = false;
 
-    // Use alternate screen buffer for a clean rendering surface (avoids scrollback issues)
-    let _ = io::stderr().write_all(format!("{ALT_SCREEN_ON}{HIDE_CURSOR}").as_bytes());
+    // Reset scroll region (DECSTBM) and origin mode (DECOM) — Claude Code's statusline
+    // sets a scroll region that child processes inherit, causing rendering offset.
+    // Then enter alternate screen for a clean surface.
+    let _ = io::stderr().write_all(b"\x1b[r\x1b[?6l\x1b[?1049h\x1b[?25l");
     let _ = io::stderr().flush();
 
     let leave = || {

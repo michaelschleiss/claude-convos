@@ -641,8 +641,9 @@ fn run_interactive(conversations: &[ConversationInfo], total_files: usize) {
     let mut cursor: usize = 0;
     let mut scroll_offset: usize = 0;
 
-    // Enter alternate screen buffer and hide cursor
-    let _ = io::stderr().write_all(format!("{ALT_SCREEN_ON}{HIDE_CURSOR}").as_bytes());
+    // Reset scroll region (DECSTBM) and origin mode (DECOM) inherited from Claude Code,
+    // then enter alternate screen buffer and hide cursor
+    let _ = io::stderr().write_all(b"\x1b[r\x1b[?6l\x1b[?1049h\x1b[?25l");
     let _ = io::stderr().flush();
 
     let leave = |raw: &RawMode| {
