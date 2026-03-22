@@ -1,20 +1,28 @@
 # Claude Code JSONL Session File Specification
 
-Reverse-engineered from real session files (2026-03-22). Not official documentation.
+Reverse-engineered from real session files and the Claude Code v2.1.81 JS bundle (2026-03-22).
+Verified by 8 parallel analysis agents against 1,698 files (244,990 entries). Not official documentation.
 
 ## File Location
 
 ```
 ~/.config/claude/projects/<encoded-project-path>/<session-id>.jsonl
+~/.claude/projects/<encoded-project-path>/<session-id>.jsonl          (legacy)
 ```
 
 Where `<encoded-project-path>` replaces all non-alphanumeric chars with `-` (e.g., `-home-user-myproject`).
 
-A `sessions-index.json` in each project directory provides fast metadata lookup.
+### Session Discovery
+
+Claude Code discovers sessions via **filesystem scan** (`readdirSync`), NOT from `sessions-index.json`.
+The filename must be a valid UUID with `.jsonl` extension. Any UUID-named `.jsonl` file placed in a
+project directory will be discovered on next `--resume` or session listing. The `sessions-index.json`
+file (when present) is a performance cache, not the source of truth — Claude Code does not read it.
 
 ## Format
 
-One JSON object per line (JSONL). No file-level checksums or integrity checks.
+One JSON object per line (JSONL). Append-only log — compaction adds new entries but never deletes old ones.
+No file-level checksums or integrity checks. No content validation on load beyond JSON parsing.
 
 ---
 
@@ -22,16 +30,27 @@ One JSON object per line (JSONL). No file-level checksums or integrity checks.
 
 | Type | Has UUID? | Frequency | Purpose |
 |------|-----------|-----------|---------|
-| `progress` | Yes | ~75% | Streaming updates during tool/hook execution |
-| `assistant` | Yes | ~12% | Claude's responses (thinking, text, tool_use) |
-| `user` | Yes | ~8% | User messages and tool results |
+| `progress` | Yes | ~61% | Streaming updates during tool/hook execution |
+| `assistant` | Yes | ~20% | Claude's responses (thinking, text, tool_use) |
+| `user` | Yes | ~14% | User messages and tool results |
 | `system` | Yes | ~2% | Hook summaries, compaction, errors, turn timing |
-| `file-history-snapshot` | No | ~3% | File state snapshots for undo/rewind |
+| `file-history-snapshot` | No | ~2% | File state snapshots for undo/rewind |
 | `queue-operation` | No | <1% | User input queue (type-ahead) |
-| `summary` | No | rare | Legacy compaction format (see §3a for current) |
-| `last-prompt` | No | rare | Last user input for session restore |
-| `custom-title` | No | rare | User-set session title |
+| `last-prompt` | No | rare | Last user input for session restore (can appear multiple times) |
+| `custom-title` | No | rare | User-set or fork-generated session title |
 | `agent-name` | No | rare | Named agent session identifier |
+| `tag` | No | rare | User-set session tag via `/tag` |
+| `attribution-snapshot` | No | rare | Attribution tracking |
+| `pr-link` | No | rare | Links session to a PR (`{prNumber, prUrl, prRepository}`) |
+| `speculation-accept` | No | rare | Speculative decoding acceptance (`{timeSavedMs}`) |
+| `content-replacement` | No | rare | Content replacement records |
+| `worktree-state` | No | rare | Git worktree session info |
+| `agent-color` | No | rare | Agent color in team sessions |
+| `agent-setting` | No | rare | Agent settings |
+| `mode` | No | rare | Session mode (e.g., plan mode) |
+
+Note: the legacy `summary` type (with `leafUuid`) is fully replaced by `compact_boundary` + `isCompactSummary`.
+Zero instances found in 1,698 files.
 
 ---
 
@@ -54,15 +73,21 @@ Messages with UUIDs (`user`, `assistant`, `system`, `progress`) share:
 }
 ```
 
+`isSidechain` is `true` on all entries in subagent session files. These entries also carry an `agentId` field
+(short hash, e.g., `"aa26b6e"`). In main session files, `isSidechain` is always `false`.
+
 Optional envelope fields:
 
 | Field | When |
 |-------|------|
-| `slug` | Human-readable turn label, e.g. `"glimmering-hugging-nebula"` |
+| `slug` | Human-readable turn label, e.g. `"glimmering-hugging-nebula"` (LLM-generated, not a word list) |
 | `teamName` | Present in team/agent contexts |
-| `logicalParentUuid` | After compaction — points to pre-compaction parent |
+| `logicalParentUuid` | After compaction — points to pre-compaction parent. May reference UUIDs no longer in file. |
 | `entrypoint` | `"cli"` on some user messages |
-| `forkedFrom` | `{sessionId, messageUuid}` — present on every message in a forked session |
+| `forkedFrom` | `{sessionId, messageUuid}` — present on every message in a forked session. `messageUuid` equals own `uuid`. |
+| `agentId` | Short hash on subagent entries (68,180 occurrences) |
+| `apiError` | Error string on some assistant entries (e.g., `"max_output_tokens"`) |
+| `isMeta` | Boolean marking auto-generated/metadata messages |
 
 ---
 
@@ -83,9 +108,14 @@ Content is a **string**.
   "parentUuid": "9f9a563f-...",
   "timestamp": "2026-02-24T10:10:36.754Z",
   "todos": [],
-  "permissionMode": "default"
+  "permissionMode": "default",
+  "thinkingMetadata": { "maxThinkingTokens": 16000 }
 }
 ```
+
+`permissionMode` values: `"default"`, `"plan"`, `"acceptEdits"`, `"bypassPermissions"`, `"dontAsk"`.
+
+`thinkingMetadata` (optional): `{level, disabled, triggers, maxThinkingTokens}` — configures extended thinking.
 
 ### 1b. Text block (e.g., user interruption)
 
@@ -127,6 +157,18 @@ Content is an **array** with one `tool_result` block per tool call.
 }
 ```
 
+`tool_result.content` can be:
+- **string** (95.3% of cases) — plain text output
+- **array** (4.7%) — list of content blocks (`text`, `tool_reference`, or `image`)
+- **null** (rare)
+
+`tool_result.is_error` is **optional** — absent ~50% of the time (older sessions). When present: `true` on errors, `false` on success.
+
+`tool_reference` blocks appear inside `tool_result.content` arrays (from ToolSearch):
+```json
+{"type": "tool_reference", "tool_name": "Glob"}
+```
+
 ### 1d. Image content
 
 ```json
@@ -137,11 +179,7 @@ Content is an **array** with one `tool_result` block per tool call.
     "content": [
       {
         "type": "image",
-        "source": {
-          "type": "base64",
-          "media_type": "image/jpeg",
-          "data": "..."
-        }
+        "source": { "type": "base64", "media_type": "image/jpeg", "data": "..." }
       }
     ]
   }
@@ -158,11 +196,7 @@ Content is an **array** with one `tool_result` block per tool call.
     "content": [
       {
         "type": "document",
-        "source": {
-          "type": "base64",
-          "media_type": "application/pdf",
-          "data": "..."
-        }
+        "source": { "type": "base64", "media_type": "application/pdf", "data": "..." }
       }
     ]
   }
@@ -175,15 +209,18 @@ Content is an **array** with one `tool_result` block per tool call.
 {
   "type": "user",
   "isCompactSummary": true,
+  "isVisibleInTranscriptOnly": true,
   "message": {
     "role": "user",
-    "content": "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion...\n\n1. User asked to find the branch...\n..."
+    "content": "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n..."
   },
   "parentUuid": "86133565-..."
 }
 ```
 
-Always the immediate child of a `compact_boundary` system message.
+Always the immediate child of a `compact_boundary` system message (verified 48/48).
+Always starts with the preamble "This session is being continued...".
+May also have `promptId` field.
 
 ---
 
@@ -191,7 +228,10 @@ Always the immediate child of a `compact_boundary` system message.
 
 All assistant messages have `message.model`, `message.id`, `message.usage`, `requestId`.
 
-**Key streaming behavior**: A single API response (same `message.id`) is split across **multiple JSONL lines**, each containing exactly one content block. Each line gets its own `uuid` but shares the same `message.id`.
+**Key streaming behavior**: A single API response (same `message.id`) is split across **multiple JSONL lines**,
+each typically containing one content block. Each line gets its own `uuid` but shares the same `message.id`.
+
+Note: In rare cases (observed once with Haiku subagent), a single line may contain multiple `tool_use` blocks.
 
 ### 2a. Thinking block
 
@@ -220,14 +260,20 @@ All assistant messages have `message.model`, `message.id`, `message.usage`, `req
         "ephemeral_1h_input_tokens": 4252
       },
       "output_tokens": 11,
-      "service_tier": "standard"
+      "service_tier": "standard",
+      "inference_geo": "not_available",
+      "server_tool_use": { "web_search_requests": 0, "web_fetch_requests": 0 },
+      "iterations": [],
+      "speed": "standard"
     }
   },
   "requestId": "req_011CYS..."
 }
 ```
 
-The `signature` is a protobuf-encoded cryptographic integrity check on thinking content.
+The `signature` is a cryptographic integrity check on thinking content (appears to be protobuf-encoded, but
+Anthropic describes it as "opaque" — not officially confirmed as protobuf). Always present on thinking blocks,
+always base64. Not validated locally on session load; only verified by the API on subsequent calls.
 
 ### 2b. Tool use
 
@@ -255,6 +301,9 @@ The `signature` is a protobuf-encoded cryptographic integrity check on thinking 
 }
 ```
 
+`caller` is **optional** — absent ~28% of the time (older sessions, some MCP tools). When present, the only
+observed value is `{"type": "direct"}`. Per Anthropic docs, can also be `{"type": "code_execution_...", "tool_id": "..."}`.
+
 Parallel tool calls are **split into separate JSONL lines** (one tool_use per line), all sharing the same `message.id`.
 
 ### 2c. Text response
@@ -267,15 +316,14 @@ Parallel tool calls are **split into separate JSONL lines** (one tool_use per li
     "id": "msg_01CXoc...",
     "role": "assistant",
     "content": [
-      {
-        "type": "text",
-        "text": "Here are the branches related to Docker..."
-      }
+      { "type": "text", "text": "Here are the branches related to Docker..." }
     ],
     "usage": { ... }
   }
 }
 ```
+
+Assistant `message.content` is **always an array**, never a plain string (verified 47,858/47,858).
 
 ### 2d. Synthetic message (no API call)
 
@@ -293,11 +341,26 @@ Parallel tool calls are **split into separate JSONL lines** (one tool_use per li
 
 ### Content block types in assistant messages
 
-| Block type | Fields |
-|------------|--------|
-| `thinking` | `thinking` (string), `signature` (base64) |
-| `text` | `text` (string) |
-| `tool_use` | `id`, `name`, `input` (object), `caller` |
+| Block type | Fields | Notes |
+|------------|--------|-------|
+| `thinking` | `thinking` (string), `signature` (base64) | Always exactly these 2 + `type` |
+| `text` | `text` (string) | Always exactly this 1 + `type` |
+| `tool_use` | `id`, `name`, `input` (object) | + optional `caller` |
+
+### Usage fields (complete)
+
+| Field | Notes |
+|-------|-------|
+| `input_tokens` | |
+| `output_tokens` | |
+| `cache_creation_input_tokens` | |
+| `cache_read_input_tokens` | |
+| `cache_creation` | `{ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}` |
+| `service_tier` | `"standard"` or null |
+| `inference_geo` | `"not_available"` or `""` |
+| `server_tool_use` | `{web_search_requests, web_fetch_requests}` |
+| `iterations` | Array (always empty observed) or null |
+| `speed` | `"standard"` (only value observed) |
 
 ---
 
@@ -305,7 +368,8 @@ Parallel tool calls are **split into separate JSONL lines** (one tool_use per li
 
 ### 3a. compact_boundary
 
-Marks a context compaction event. Creates a **new root** (`parentUuid: null`).
+Marks a context compaction event. In non-forked sessions, creates a **new root** (`parentUuid: null`).
+In forked sessions, `parentUuid` may be non-null (the fork re-links compact boundaries into a single chain).
 
 ```json
 {
@@ -316,17 +380,32 @@ Marks a context compaction event. Creates a **new root** (`parentUuid: null`).
   "logicalParentUuid": "d73c2ecb-...",
   "compactMetadata": {
     "trigger": "auto",
-    "preTokens": 167393
+    "preTokens": 167393,
+    "preCompactDiscoveredTools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"],
+    "userContext": "custom compaction instructions if any",
+    "messagesSummarized": 42
   },
   "level": "info"
 }
 ```
 
-The next message is always a `user` with `isCompactSummary: true`.
+`compactMetadata` fields:
+- `trigger`: `"auto"` or `"manual"` (only `"auto"` observed in data)
+- `preTokens`: token count before compaction (range: 167K–175K for 200K context)
+- `preCompactDiscoveredTools`: optional array of tool names (present in 6/48)
+- `userContext`: optional custom compaction instructions
+- `messagesSummarized`: optional count of summarized messages
+- `preserved_segment`: optional `{head_uuid, anchor_uuid, tail_uuid}` for partial compaction (from Zod schema)
+
+The next message is always a `user` with `isCompactSummary: true` (verified 48/48).
+
+**Auto-compact threshold** (from binary): `effectiveWindow - 13,000` tokens.
+For 200K context: ~167K. For 1M context: ~967K.
 
 ### 3b. microcompact_boundary
 
-Lighter-weight compaction that truncates large tool outputs without summarizing the full conversation.
+Lighter-weight compaction that truncates large tool outputs to 2KB preview + disk reference.
+Does NOT create a new root (parentUuid is normal). Does NOT summarize the conversation.
 
 ```json
 {
@@ -343,7 +422,7 @@ Lighter-weight compaction that truncates large tool outputs without summarizing 
 }
 ```
 
-Does NOT create a new root (parentUuid is normal).
+`clearedAttachmentUUIDs` is always `[]` in observed data. Disable with `DISABLE_MICROCOMPACT=1`.
 
 ### 3c. turn_duration
 
@@ -394,11 +473,20 @@ Does NOT create a new root (parentUuid is normal).
 
 Logged when the user runs a `!command` or `/slash` command.
 
+### 3g. Other system subtypes (from binary)
+
+Found in binary source but not observed in local data:
+`api_retry`, `error`, `interrupt`, `init`, `initialize`, `elicitation`, `elicitation_complete`,
+`hook_callback`, `hook_response`, `hook_started`, `mcp_message`, `mcp_reconnect`, `mcp_set_servers`,
+`mcp_status`, `mcp_toggle`, `rewind_files`, `set_model`, `set_permission_mode`,
+`set_max_thinking_tokens`, `status`, `apply_flag_settings`, `cancel_async_message`, `can_use_tool`,
+`files_persisted`, `get_settings`, `local_command_output`, `memory_saved`, `agents_killed`
+
 ---
 
 ## 4. Progress Messages
 
-Streaming updates during tool execution. **Not sent to the API.**
+Streaming updates during tool execution. **Not sent to the API.** Participate in the UUID chain.
 
 ### 4a. hook_progress
 
@@ -448,9 +536,12 @@ Streaming updates during tool execution. **Not sent to the API.**
 }
 ```
 
-### 4d. mcp_progress, waiting_for_task
+### 4d. Other progress subtypes
 
-Additional progress subtypes for MCP tool execution and background task polling.
+- `mcp_progress` — MCP tool execution
+- `waiting_for_task` — background task polling
+- `query_update` — search query updates (2,378 occurrences)
+- `search_results_received` — search results streaming (2,378 occurrences)
 
 ---
 
@@ -493,13 +584,30 @@ User input queued while Claude is working. No uuid/parentUuid.
 
 ## 7. Metadata-Only Entry Types
 
-No uuid/parentUuid. One per session file.
+No uuid/parentUuid. `last-prompt` can appear multiple times per file (appended on each session resume).
 
 ```json
 {"type": "last-prompt",  "lastPrompt": "text",    "sessionId": "UUID4"}
 {"type": "custom-title", "customTitle": "text",    "sessionId": "UUID4"}
 {"type": "agent-name",   "agentName":  "name",     "sessionId": "UUID4"}
+{"type": "tag",          "tag":        "text",     "sessionId": "UUID4"}
 ```
+
+---
+
+## Message Filter
+
+The binary's `En()` function determines which entries go into the conversation message array:
+
+```javascript
+function En(m) {
+  return m.type === "user" || m.type === "assistant" ||
+         m.type === "attachment" || m.type === "system" || m.type === "progress";
+}
+```
+
+The `attachment` type is accepted but not observed in local data. Other types (file-history-snapshot,
+queue-operation, metadata types) are parsed for metadata but NOT included in the conversation transcript.
 
 ---
 
@@ -538,31 +646,47 @@ assistant (new msg_id) → [text: response]
 
 ## toolUseResult Metadata
 
-The `toolUseResult` top-level field on user messages carries tool-specific structured metadata **separate from** the `tool_result` content sent to the model.
+The `toolUseResult` top-level field on user messages carries tool-specific structured metadata
+**separate from** the `tool_result` content sent to the model.
 
 ### Per-tool schemas
 
 | Tool | Key fields |
 |------|------------|
-| **Bash** | `stdout`, `stderr`, `interrupted`, `isImage`, `noOutputExpected`, `backgroundTaskId`, `persistedOutputPath`, `persistedOutputSize` |
+| **Bash** | `stdout`, `stderr`, `interrupted`, `isImage`, `noOutputExpected`, `backgroundTaskId`, `persistedOutputPath`, `persistedOutputSize`, `returnCodeInterpretation`, `assistantAutoBackgrounded`, `backgroundedByUser` |
 | **Read** | `type: "text"`, `file: {filePath, content}` |
-| **Write** | `type: "create"`, `filePath`, `content`, `originalFile: null` |
-| **Edit** | `filePath`, `oldString`, `newString`, `replaceAll`, `originalFile`, `structuredPatch: [{oldStart, oldLines, newStart, newLines, lines}]` |
+| **Write** | `type: "create"`, `filePath`, `content`, `originalFile`, `structuredPatch` |
+| **Edit** | `filePath`, `oldString`, `newString`, `replaceAll`, `originalFile`, `structuredPatch: [{oldStart, oldLines, newStart, newLines, lines}]`, `userModified` |
 | **Glob** | `durationMs`, `filenames: [...]`, `numFiles`, `truncated` |
-| **Grep** | `mode`, `numFiles`, `numLines`, `filenames`, `content`, `appliedLimit` |
-| **Agent/Task** | `agentId`, `status`, `prompt`, `content`, `totalDurationMs`, `totalTokens`, `totalToolUseCount`, `usage`, `model` |
+| **Grep** | `mode`, `numFiles`, `numLines` (optional), `filenames`, `content` (optional), `appliedLimit` (optional) |
+| **Agent/Task** | `agentId`, `status`, `prompt`, `content`, `totalDurationMs`, `totalTokens`, `totalToolUseCount`, `usage`, `model`, `agent_type`, `name`, `team_name`, `color`, `is_splitpane`, `plan_mode_required`, `outputFile`, `isAsync`, `canReadOutputFile` |
 | **WebSearch** | `query`, `durationSeconds`, `results: [{tool_use_id, content: [{title, url}]}]` |
 | **WebFetch** | `url`, `code`, `codeText`, `bytes`, `durationMs`, `result` |
-| **TaskCreate** | `task: {id, subject}` |
-| **TaskUpdate** | `success`, `taskId`, `updatedFields` |
-| **LSP** | `operation`, `filePath`, `result`, `fileCount`, `resultCount` |
+| **TaskCreate** | `task: {id, subject}`, `retrieval_status` (optional) |
+| **TaskUpdate** | `success`, `taskId`, `updatedFields`, `statusChange` (optional), `error` (optional) |
+| **TaskList** | `tasks: [...]` |
+| **TaskGet** | `task: {...}` |
+| **TaskOutput** | `retrieval_status`, `task: {task_id, task_type, status, output, ...}` |
+| **TaskStop** | `task_id`, `task_type`, `command`, `message` |
+| **LSP** | `operation`, `filePath`, `result`, `fileCount` (optional), `resultCount` (optional) |
 | **ToolSearch** | `query`, `matches: [...]`, `total_deferred_tools` |
+| **Skill** | `success`, `commandName`, `allowedTools` (optional) |
+| **AskUserQuestion** | `questions`, `answers`, `annotations` (optional) |
+| **SendMessage** | `success`, `message`, `routing` (optional), `request_id` (optional) |
+| **EnterPlanMode** | `message` |
+| **ExitPlanMode** | `plan`, `filePath`, `hasTaskTool`, `isAgent` |
+| **TeamCreate** | `lead_agent_id`, `team_file_path`, `team_name` |
+| **TeamDelete** | `success`, `message`, `team_name` |
+| **TodoWrite** | `newTodos`, `oldTodos`, `verificationNudgeNeeded` |
+| **CronCreate** | `durable`, `humanSchedule`, `id`, `recurring` |
+
+Note: `Task` is the newer name for `Agent` — both tool names exist. They share the same schema.
 
 ---
 
 ## UUID Tree Structure
 
-Messages form a **long linear chain** (not a bushy tree). Each message typically has one parent and one child.
+Messages form a **long linear chain** (~85-94% of nodes have exactly one child). Max branching factor is 2.
 
 ```
 hook_progress (uuid=A, parentUuid=null)     ← session start
@@ -579,13 +703,19 @@ hook_progress (uuid=A, parentUuid=null)     ← session start
 ### Branch points
 
 Most "branches" (multiple children sharing a parentUuid) are **mechanical**, not conversational forks:
-- ~83% are `assistant → (progress + user)` — tool execution mechanics
-- ~16% are `assistant → (assistant + user)` — streaming chunks
-- ~1% are genuine conversation forks (user sent two different messages from the same point)
+- **~84%** are `assistant → (progress + user)` — tool execution mechanics
+- **~15%** are `assistant → (assistant + user)` — streaming chunks
+- **~1%** are genuine conversation forks
+
+### Message ordering
+
+**99.5%+ chronological** by entry pair. Sub-second anomalies (queue-operation timing, async progress delivery)
+are normal. Larger jumps (minutes) are rare and related to session suspends/resumes. The UUID chain
+reconstruction (`xtH()`) walks `parentUuid` links, not line order, so reordering doesn't break loading.
 
 ### After Compaction
 
-Each compaction creates a **new root** that breaks the UUID chain:
+In non-forked sessions, each compaction creates a **new root** (`parentUuid: null`):
 
 ```
 compact_boundary (uuid=X, parentUuid=null, logicalParentUuid=old_msg)
@@ -595,22 +725,47 @@ compact_boundary (uuid=X, parentUuid=null, logicalParentUuid=old_msg)
 
 A session with 6 compactions has 7 root nodes (1 original + 6 compact_boundary).
 
+**In forked sessions**, compact_boundary entries are re-parented to the preceding entry, forming a single
+continuous chain with 1 root instead of multiple roots. UUIDs are preserved but parentUuid on
+compact_boundary entries is altered by the fork process.
+
 ### Forked Sessions
 
 When a session is forked (`--fork-session` or `/fork`):
 - The new JSONL file is a **complete copy** of a prefix of the parent
 - **Every** message in the fork has `forkedFrom: {sessionId, messageUuid}`
-- `forkedFrom.messageUuid` equals the message's own `uuid` (UUIDs are preserved)
+- `forkedFrom.messageUuid` equals the message's own `uuid` (UUIDs are preserved verbatim)
+- The fork process **re-links compact_boundary parentUuids** to create a single-rooted chain
 - New messages (after the fork point) get fresh UUIDs without `forkedFrom`
 - A `custom-title` entry records the fork lineage
 
+### Session Continuation (distinct from forking)
+
+When context is exhausted and a new session is created via `--continue`, the new file starts with a prefix
+copy of records from the parent (with the parent's sessionId). The file's own session starts where the
+sessionId changes. Both files share the same `slug`. No `forkedFrom` field is used.
+
 ---
 
-## All 55 Top-Level Keys (Complete Inventory)
+## Resume / Session Loading (from binary)
+
+1. Check file size. If >5MB, use fast path: scan for `"compact_boundary"` marker in 64KB chunks
+2. Skip everything before the last `compact_boundary`
+3. Parse post-boundary entries with `dx()` (JSON.parse per line)
+4. Filter through `En()` — only `user`, `assistant`, `attachment`, `system`, `progress` enter the message Map
+5. Walk `parentUuid` chain backwards from leaf via `xtH()` (with cycle detection)
+6. `hH_()` post-processor splices in sibling assistant messages sharing the same `message.id`
+7. Non-UUID entries (metadata, snapshots, queue-ops) are parsed separately for their specific purposes
+
+---
+
+## All Top-Level Keys (Complete Inventory)
+
+Verified across 244,990 entries plus binary source:
 
 ```
-agentName, cause, compactMetadata, content, customTitle, cwd, data,
-durationMs, entrypoint, error, forkedFrom, gitBranch, hasOutput,
+agentId, agentName, apiError, cause, compactMetadata, content, customTitle,
+cwd, data, durationMs, entrypoint, error, forkedFrom, gitBranch, hasOutput,
 hookCount, hookErrors, hookInfos, isApiErrorMessage, isCompactSummary,
 isMeta, isSidechain, isSnapshotUpdate, isVisibleInTranscriptOnly,
 lastPrompt, level, logicalParentUuid, maxRetries, mcpMeta, message,
@@ -621,20 +776,35 @@ sourceToolUseID, stopReason, subtype, teamName, thinkingMetadata,
 timestamp, todos, toolUseID, toolUseResult, type, userType, uuid, version
 ```
 
+(59 keys)
+
 ---
 
 ## Editing Safety
 
 | What | Safe? | Notes |
 |------|-------|-------|
-| Edit message text content | Yes | |
-| Edit tool result content | Yes | |
-| Delete whole lines | Yes | Maintain UUID chain |
-| Append new messages | Yes | Generate valid UUIDs, link parentUuid |
-| Delete progress lines | Yes | Not sent to API |
-| Delete file-history-snapshot | Yes | Only affects undo |
+| Edit message text content | Yes | No content validation on load |
+| Edit tool result content | Yes | No validation of content type or format |
+| Delete whole lines | Mostly | Re-link children's parentUuid to deleted node's parent |
+| Append new messages | Yes | Need valid UUID, chain parentUuid correctly |
+| Delete progress lines | Mostly | Safe if no other message references it as parentUuid. Progress participates in UUID chain. |
+| Delete file-history-snapshot | Yes | Only affects undo/rewind |
 | Delete queue-operation | Yes | Only affects input queue replay |
-| Edit thinking content | Risky | Invalidates signature |
-| Break UUID parentUuid chain | Bad | Orphans messages |
-| Change sessionId | Bad | Session lookup fails |
-| Reorder lines | Risky | Mostly chronological, minor deviations normal |
+| Edit thinking content | Risky | Not validated locally, but API rejects modified thinking on next call |
+| Break UUID parentUuid chain | Tolerated | Chain stops at break; earlier messages become invisible but no crash |
+| Change sessionId | Bad | Many lookups index by sessionId |
+| Reorder lines | Mostly safe | Chain reconstruction uses parentUuid, not line order. Metadata uses `findLast`. |
+| Add new .jsonl file | Works | Filesystem scan discovers any UUID-named .jsonl in project dir |
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `DISABLE_AUTO_COMPACT` | Disable auto-compaction |
+| `DISABLE_COMPACT` | Disable all compaction |
+| `DISABLE_MICROCOMPACT` | Disable microcompaction |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | Set auto-compact threshold as % (can only lower, not raise) |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Override effective context window size |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Override max output tokens |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | Disable auto memory |
