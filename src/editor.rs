@@ -314,23 +314,23 @@ fn run_editor_tui(
                 "   ".to_string()
             };
 
+            let role_padded = pad_or_truncate(&m.role, w_role - 4);
+
             if selected {
                 out.push_str(&format!(
-                    "{BG_BLUE}{BOLD}{WHITE} {idx_str:>w_idx$}  {mark} {:<w_r$}  {content}{RESET}\x1b[K\n",
-                    m.role,
-                    w_r = w_role - 4, // subtract mark width
+                    "{BG_BLUE}{BOLD}{WHITE} {idx_str:>w_idx$}  {mark} {role_padded}  {content}{RESET}\x1b[K\n",
                 ));
             } else if m.marked {
                 out.push_str(&format!(
-                    " {DIM}{idx_str:>w_idx$}  {mark} {role_display}{:<pad$}  \x1b[9m{content}\x1b[29m{RESET}\x1b[K\n",
+                    " {DIM}{idx_str:>w_idx$}  {mark} {role_display}{RESET}{DIM}{:<pad$}  \x1b[9m{content}\x1b[29m{RESET}\x1b[K\n",
                     "",
-                    pad = w_role - 4 - m.role.len(),
+                    pad = (w_role - 4).saturating_sub(m.role.len()),
                 ));
             } else {
                 out.push_str(&format!(
                     " {DIM}{idx_str:>w_idx$}{RESET}  {mark} {role_display}{:<pad$}  {content}\x1b[K\n",
                     "",
-                    pad = w_role - 4 - m.role.len(),
+                    pad = (w_role - 4).saturating_sub(m.role.len()),
                 ));
             }
         }
